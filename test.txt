@@ -1,0 +1,1030 @@
+import { useRouter } from "next/router";
+import React, { useEffect, useState } from "react";
+import { verifySessionExpiry } from "../../hooks/getSession";
+import createApolloClient from "../../lib/apolloClient";
+import { createShortAddressString } from "../../lib/createAddress";
+import { removeBodyStyles } from "../../lib/misc";
+import { ERROR_LOGS } from "../../lib/queries/errorLog";
+import { GET_EVENTS_DETAILS, USER_ID_QUERY } from "../../lib/queries/eventsFeed";
+import { EVENT_BY_ID } from "../../lib/queries/issueEvents";
+import CommentsMobile from "../comments/CommentsMobile";
+import { getDateFormat } from "../comments/commentsMobile.util";
+import EmptyEvents from "../emptyStates/Events";
+import EventPostDetails from "../events/eventPostDetails";
+import EventsPost from "../events/eventsPost";
+import FeedLoader from "../feedLoader";
+import ReportingOptions from "../ReportingOptions/reportingOptions";
+import ShowDetailsMobile from "../showDetailsMobile";
+import ShowDetailsWeb from "../showDetailsWeb";
+import { pollPosts } from "../../api/auth";
+import { POLLS_EVENTS_DETAILS, POLLS_FEED_DETAILS, POLL_BY_ID } from "../../lib/queries/poll";
+import { CreateUpcomingEventArr, filterAndSortEvents } from "../../lib/eventOps";
+import PollsPost from "../polls/pollsPost";
+import PollPostDetails from "../polls/pollsPostDetails";
+import EmptyCommon from "../emptyStates/common";
+
+const EventsComponent = (props: any) => {
+  const router = useRouter();
+  const [message, setMessage] = useState("Fetching Location");
+
+
+  const [currentAddress, setCurrentAddress] = useState("");
+  const [loadingEvents, setLoadingEvents] = useState<boolean>(true);
+  const [eventsArr, setEventsArr] = useState<any[]>([]);
+  const [eventDetailsStatus, setEventDetailsStatus] = useState(false);
+  const [showDetailsWeb, setShowDetailsWeb] = useState(false);
+  const [showDetailsMobile, setShowDetailsMobile] = useState(false);
+  const [post, setPost] = useState<any>(null);
+  const [reportOptionsStatus, setReportOptionsStatus] = useState(false);
+  const [noEventsToFetch, setNoEventsToFetch] = useState<boolean>(false);
+  const [profileDetails, setProfileDetails] = useState<any>(null);
+  const [displayComments, setDisplayComments] = useState(false);
+  const currentDate = getDateFormat();
+  const [nearbyEvents, setNearbyEvents] = useState<any[]>([]);
+  const [onlineEvents, setOnlineEvents] = useState<any[]>([]);
+  const [page, setPage] = useState<number>(0);
+  const pageSize = 10;
+  let blockDebounceAccess: boolean = false;
+  const [noMoreDataToFetch, setNoMoreDataToFetch] = useState<any>(false);
+  const [debounceStatus, setDebounceStatus] = useState<any>(false);
+  const [isLazyLoading, setIsLazyLoading] = useState<any>(false);
+  const [isLazyLoadingMsg, setIsLazyLoadingMsg] = useState<string>('');
+
+  const fetchEvents = async (
+    lat?: any,
+    long?: any,
+    refetch?: boolean
+  ) => {
+    try {
+      if (props.refreshFeedName === 'Event') props.setRefreshFeedName('');
+      setMessage("Loading events...");
+      props.setLoadUpcomingEvents(true);
+      let onlyDeletedEvents = false;
+      const obj = {
+        Id: props.session.payload.sub,
+        createdBy: props.session.payload.sub,
+        locationinput: {
+          type: "Point",
+          crs: {
+            type: "name",
+            properties: { name: "urn:ogc:def:crs:EPSG::4326" },
+          },
+          coordinates: [lat ? lat : props.longitude, long ? long : props.latitude],
+        },
+        _gt: getDateFormat()
+      };
+      const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+      const { data } = await client.query({
+        query: USER_ID_QUERY,
+        variables: obj,
+      });
+      if (data.search_events_near_location[0].nearby_issues) {
+        const notDeletedIndex = data.search_events_near_location[0].nearby_issues.findIndex((event: any) => event.isDeleted == false);
+        if (notDeletedIndex == -1) {
+          onlyDeletedEvents = true;
+          setNoEventsToFetch(true);
+        }
+      }
+      if (data.UserProfile_by_pk) setProfileDetails(data.UserProfile_by_pk);
+      if (
+        (!data.search_events_near_location[0].nearby_issues &&
+          data.Event.length == 0) || onlyDeletedEvents
+      ) {
+        setMessage("No Events found");
+        props.setLoadUpcomingEvents(false);
+        setLoadingEvents(false);
+      }
+
+      if (
+        data.search_events_near_location.length > 0 &&
+        ((data.search_events_near_location[0].nearby_issues &&
+          data.search_events_near_location[0].nearby_issues.length > 0) ||
+          (data.Event && data.Event.length > 0)) &&
+        (eventsArr.length === 0 || refetch)
+      ) {
+        setNearbyEvents(data.search_events_near_location[0].nearby_issues);
+        setOnlineEvents(data.Event);
+        fetchEventsDetails(
+          onlyDeletedEvents ? [] : data.search_events_near_location[0].nearby_issues,
+          data.Event
+        );
+      } else {
+        setMessage("No events found");
+      }
+    } catch (error: any) {
+      setLoadingEvents(false);
+
+      const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+      const { data } = await client.mutate({
+        mutation: ERROR_LOGS,
+        variables: {
+          errorMessage: error.message,
+          errorScreen: "Events Component - fetch Events",
+          userId: props.session.payload.sub,
+          createdTime: currentDate,
+        },
+      });
+    }
+  };
+  const fetchEventsDetails = async (
+    eventsNearUserArr: any[],
+    onlineEventsArr: any[],
+    fetchMore?: boolean
+  ) => {
+    if (fetchMore) {
+      setIsLazyLoading(true);
+      setIsLazyLoadingMsg('Loading More Feed...');
+    }
+    try {
+      let idArr: any[] = [];
+      eventsNearUserArr?.map((issues: any) => {
+        idArr.push(issues.Id);
+      });
+      const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+      const { data } = await client.query({
+        query: GET_EVENTS_DETAILS,
+        variables: {
+          _in: idArr,
+          createdBy: props.session.payload.sub,
+          offset: pageSize * page,
+          _gt: getDateFormat()
+        },
+      });
+      sortAndCombineIssueAndEvents(data.Event, onlineEventsArr, fetchMore);
+      if (fetchMore) {
+        if (data.Event.length === 0) setNoMoreDataToFetch(true)
+        setIsLazyLoading(false);
+        setIsLazyLoadingMsg('');
+      }
+      if (data.Event.length == 0 && onlineEventsArr.length == 0) setNoEventsToFetch(true);
+      setLoadingEvents(false);
+    } catch (error: any) {
+      if (fetchMore) {
+        setIsLazyLoading(false);
+        setIsLazyLoadingMsg('');
+      }
+      setLoadingEvents(false);
+      const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+      const { data } = await client.mutate({
+        mutation: ERROR_LOGS,
+        variables: {
+          errorMessage: error.message,
+          errorScreen: "Issue Post Details - handle Add Comment",
+          userId: props.session.payload.sub,
+          createdTime: currentDate,
+        },
+      });
+    }
+  };
+  const filterAndSortEvents = (eventsData: any[], onlineEventsArr: any[]) => {
+    let eventArr = [...eventsData, ...onlineEventsArr];
+    const dateToday = new Date();
+    eventArr = Array.from(new Set(eventArr.map(a => a.Id)))
+      .map(Id => {
+        return eventArr.find(a => a.Id === Id)
+      });
+
+    eventArr = eventArr.filter((item: any) => {
+      const eventDate = new Date(item.eventStartDate);
+      const eventEndDate = new Date(item.eventEndDate);
+      if (dateToday.getTime() < eventDate.getTime() || dateToday.getTime() < eventEndDate.getTime()) {
+        return true;
+      }
+    });
+    const sortedEventsArr = eventArr.slice().sort((a: any, b: any) => {
+      const date1 = new Date(a.eventStartDate);
+      const date2 = new Date(b.eventStartDate);
+      if (date1.getTime() > date2.getTime()) {
+        return 1;
+      }
+      return -1;
+    });
+    return sortedEventsArr;
+  }
+  const sortAndCombineIssueAndEvents = (eventsData: any[], onlineEventsArr: any[], fetchMore?: boolean) => {
+    try {
+      let newEventsArr: any = [];
+      if (!fetchMore) {
+        newEventsArr = filterAndSortEvents(eventsData, onlineEventsArr);
+      } else {
+        newEventsArr = filterAndSortEvents([...eventsArr, ...eventsData], onlineEventsArr);
+      }
+      setEventsArr(newEventsArr);
+      SetUpcomingEvents(newEventsArr);
+    } catch (error: any) {
+      setLoadingEvents(false);
+
+    }
+  };
+
+  const SetUpcomingEvents = (eventDataArr: any[]) => {
+    try {
+      let upcomingEventsArr: any[] = [];
+      eventDataArr.map((event: any) => {
+        if (upcomingEventsArr.length < 3) {
+          const currentDate = new Date();
+          const eventStartDate = new Date(event.eventStartDate);
+          const eventEndDate = new Date(event.eventEndDate);
+          if (eventStartDate.getTime() > currentDate.getTime() || eventEndDate.getTime() > currentDate.getTime()) {
+            const obj = {
+              Id: event.Id,
+              eventDay: eventStartDate.getDate(),
+              eventMonthYear: new Intl.DateTimeFormat("en-IN", {
+                month: "short",
+                year: "2-digit",
+              }).format(new Date(event.eventStartDate)),
+              eventName: event.eventName,
+              eventAddress: createShortAddressString(event.eventAddress),
+            };
+            upcomingEventsArr.push(obj);
+          }
+        }
+      });
+      props.setUpcomingEvents(upcomingEventsArr);
+      props.setLoadUpcomingEvents(false);
+    } catch (error: any) {
+
+      props.setLoadUpcomingEvents(false);
+    }
+  };
+
+
+  const setPostDetailsAndDisplay = (post: any, type: string) => {
+    try {
+      setPost(post);
+      if (type === "event") {
+        setEventDetailsStatus(true);
+        setReportOptionsStatus(false);
+      }
+      if (type === "comments") { setDisplayComments(true); }
+      if (window.matchMedia("(max-width: 991px)").matches) {
+        setShowDetailsMobile(true);
+      } else {
+        setShowDetailsWeb(true);
+      }
+    } catch (error: any) {
+
+    }
+  };
+
+  const hidePostDetails = () => {
+    try {
+      if (window.matchMedia("(max-width: 991px)").matches) {
+        setShowDetailsMobile(false);
+        const detailsTimeout = setTimeout(() => {
+          clearTimeout(detailsTimeout);
+          if (eventDetailsStatus) setEventDetailsStatus(false);
+          if (displayComments) setDisplayComments(false);
+        }, 300);
+      } else {
+        setShowDetailsWeb(false);
+        setEventDetailsStatus(false);
+      }
+      const hidePostDetailsTimeout = setTimeout(() => {
+        clearTimeout(hidePostDetailsTimeout);
+        removeBodyStyles();
+      }, 300);
+    } catch (error: any) {
+
+    }
+  };
+
+  // const hideCommentsOpenPost = (type: string) => {
+  //   hidePostDetails();
+  //   const timeout = setTimeout(() => {
+  //     clearTimeout(timeout);
+  //     setPostDetailsAndDisplay(post, type);
+  //   }, 300);
+  // };
+	const hideCommentsOpenPost = (type: string) => {
+		hidePostDetails();
+		const timeout = setTimeout(() => {
+			clearTimeout(timeout);
+			setPostDetailsAndDisplay(post, type);
+		}, 300);
+	};
+
+
+
+  // const setActionTypeAndDisplay = (type: string) => {
+  //   setActionType(type);
+  //   setShowAddActions(true);
+  // };
+
+
+  useEffect(() => {
+
+    if (
+      props.encodedToken &&
+      props.latitude &&
+      props.longitude &&
+      eventsArr.length === 0 &&
+      !props.getLocationStatus &&
+      !noEventsToFetch
+    ) {
+      fetchEvents();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventsArr, props.session, currentAddress, props.latitude, props.longitude, props.getLocationStatus, isLazyLoading]);
+
+  useEffect(() => {
+    if (props.refreshFeedName === 'Event') {
+      fetchEvents(null, null, true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.refreshFeedName]);
+
+  const getEventById = async (Id: any, type: string) => {
+    try {
+      const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+      const { data } = await client.query({
+        query: EVENT_BY_ID,
+        variables: { Id: parseInt(Id) }
+      });
+      if (type == "Event" && data.Event?.length > 0) {
+        let prevArr = eventsArr.slice();
+        const index = prevArr.findIndex(
+          (x) => x.Id == Id && x.__typename == type
+        );
+        if (index > -1) {
+          if (post && post?.Id === data.Event[0].Id) {
+            setPost(data.Event[0]);
+          }
+          prevArr[index] = data.Event[0];
+          setEventsArr(prevArr);
+        }
+      }
+    } catch (err) { }
+  };
+  const deleteItem = (id: number, type: string) => {
+    const tempEventArr = eventsArr.slice().filter((item: any) => (!(item.__typename == type && item.Id == id)));
+    setEventsArr([]);
+    setEventsArr(tempEventArr);
+  }
+  // const showReportingOptions = (post: any, type: string) => {
+  //   try {
+  //     setPost(post);
+  //     if (type === "event") {
+  //       setReportOptionsStatus(true);
+  //       setEventDetailsStatus(false);
+  //     }
+  //     if (type === "comments") setDisplayComments(true);
+  //     if (window.matchMedia("(max-width: 991px)").matches) {
+  //       setShowDetailsMobile(true);
+  //     } else {
+  //       setShowDetailsWeb(true);
+  //     }
+  //   }
+  //   catch (error: any) {
+  //   }
+  // };
+  	const showReportingOptions = (post: any, type: string) => {
+		try {
+			setPost(post);
+			if (type === "poll") {
+				setReportOptionsStatus(true);
+				setIssueDetailsStatus(false)
+			}
+			if (type === "comments") setDisplayComments(true);
+			if (window.matchMedia("(max-width: 991px)").matches) {
+				setShowDetailsMobile(true);
+			} else {
+				setShowDetailsWeb(true);
+			}
+		}
+		catch (error: any) {
+		}
+	};
+
+  const fetchMoreListItems = async () => {
+    await fetchEventsDetails(nearbyEvents, onlineEvents, true);
+  };
+
+  useEffect(() => {
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  });
+
+  useEffect(() => {
+    if (!blockDebounceAccess && eventsArr.length == 0) return;
+    fetchMoreListItems();
+  }, [blockDebounceAccess, page]);
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+  
+	const [pollsArr, setPollsArr] = useState<any[]>([]);
+	const [issueDetailsStatus, setIssueDetailsStatus] = useState(false);
+	const [showAddActions, setShowAddActions] = useState(false);
+	const [actionType, setActionType] = useState("");
+	const [noPollsToFetch, setNoPollsToFetch] = useState<boolean>(false);
+	const [isOpen, setIsOpen] = useState(false);
+	const [profileData, setProfileData] = useState<any>();
+	const [loadingPolls, setLoadingPolls] = useState<boolean>(true);
+	const [nearbyPolls, setNearbyPolls] = useState<any[]>([]);
+	const [posts, setPosts] = useState<Post[]>([]);
+
+
+
+	// useEffect(() => {
+	//   const pollData = async () => {
+	//     		  try {
+	  // 		const data = await PollPosts ('1');
+	//     console.log("poll",data);
+	  // 		setPostData(data);
+	  // 	  } catch (error) 
+	//     {
+	//     console.error('Error polling posts:', error);		
+	//     }
+	  // 	};
+	  // 	pollData();
+	  // }, []);
+  
+	interface Post {
+	  id: number;
+	  title: string;
+	  content: string;
+	}
+	useEffect(() => {
+		const fetchPosts  = async () => {
+					try {
+		  const data = await pollPosts(5, 1);
+		  console.log("poll",data);
+			  setPosts(data);
+			} catch (error) 
+		  {
+		  console.error('Error polling posts:', error);		
+		  }
+		  };
+		  fetchPosts();
+	  }, []);
+
+	// useEffect(() => {
+	// 	const pollPosts = async (limit: number, page: number) => {
+	// 	  const response = await fetch(`your_api_endpoint?limit=${limit}&page=${page}`);
+	// 	  if (!response.ok) {
+
+	// 		throw new Error('Failed to fetch posts');
+	// 	  }
+	// 	  const data = await response.json();
+	// 	  return data;
+	// 	};
+	
+	// 	const fetchPosts = async () => {
+	// 	  try {
+	// 		const data = await pollPosts(5, 1);
+	// 		console.log('poll', data);
+	// 		setPosts(data);
+	// 	  } catch (error) {
+	// 		console.error('Error polling posts:', error);
+	// 	  }
+	// 	};
+	
+	// 	fetchPosts();
+	//   }, []);
+
+
+
+
+
+	const fetchPolls = async () => {
+		//console.log("polls");
+		try {
+			
+			if (props.refreshFeedName === 'Poll') props.setRefreshFeedName('');
+			setMessage("Loading polls...");
+			props.setLoadUpcomingEvents(true);
+			let onlyDeletedPolls = false;
+			let onlyDeletedEvents = false;
+			const obj = {
+				Id: props.session.payload.sub,
+				locationInput: {
+					type: "Point",
+					crs: {
+						type: "name",
+						properties: { name: "urn:ogc:def:crs:EPSG::4326" },
+					},
+					coordinates: [props.longitude, props.latitude],
+				},
+				distance_kms: 50,
+				_gt: currentDate
+			};
+			const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+			const { data } = await client.query({
+				query: POLLS_FEED_DETAILS,
+				variables: obj,
+			});
+			if (data) {
+				if (data.search_polls_near_user[0].nearby_polls) {
+					const notDeletedIndex = data.search_polls_near_user[0].nearby_polls.findIndex((poll: any) => poll.isDeleted == false);
+					if (notDeletedIndex == -1) onlyDeletedPolls = true;
+					setNoPollsToFetch(true);
+				}
+				if (data.search_events_near_location[0].nearby_issues) {
+					const notDeletedIndex = data.search_events_near_location[0].nearby_issues.findIndex((event: any) => event.isDeleted == false);
+					if (notDeletedIndex == -1) onlyDeletedEvents = true;
+				}
+				setProfileData(data.UserProfile_by_pk)
+				if (data.search_events_near_location && !data.search_events_near_location[0].nearby_issues) { props.setLoadUpcomingEvents(false); }
+				if (!data.search_polls_near_user[0].nearby_polls && !data.search_events_near_location[0].nearby_issues) {
+					setMessage("No Polls found");
+					props.setLoadUpcomingEvents(false);
+					setLoadingPolls(false);
+				}
+
+				if ((data.search_polls_near_user[0].nearby_polls && data.search_polls_near_user[0].nearby_polls.length > 0) ||
+					(data.search_events_near_location[0].nearby_issues && data.search_events_near_location[0].nearby_issues.length > 0)) {
+					const pollsArr = data.search_polls_near_user[0].nearby_polls && !onlyDeletedPolls ? data.search_polls_near_user[0].nearby_polls : [];
+					const eventsArr = data.search_events_near_location[0].nearby_issues && !onlyDeletedEvents ? data.search_events_near_location[0].nearby_issues : [];
+					const onlineEventsArr = data.Event;
+					setNearbyPolls(data.search_polls_near_user[0].nearby_polls);
+					setNearbyEvents(data.search_events_near_location[0].nearby_issues);
+					setOnlineEvents(data.Event);
+					fetchPollsEventsDetails(pollsArr, eventsArr, onlineEventsArr);
+				} else {
+					setMessage("No Polls found");
+				}
+			}
+		} catch (error: any) {
+			setLoadingPolls(false);
+			const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+			const { data } = await client.mutate({
+				mutation: ERROR_LOGS,
+				variables: {
+					errorMessage: error.message,
+					errorScreen: "Post Component - fetch Polls",
+					userId: props.session.payload.sub,
+					createdTime: currentDate,
+				},
+			});
+		}
+	}
+
+	const fetchPollsEventsDetails = async (pollsDataArr: any, eventsArr: any, onlineEventsArr: any, fetchMore?: boolean) => {
+		if (fetchMore) {
+			setIsLazyLoading(true);
+			setIsLazyLoadingMsg('Loading More Feed...');
+		}
+		try {
+			let pollsIdArr: any[] = [];
+			let eventsIdArr: any[] = [];
+			pollsDataArr.map((poll: any) => {
+				pollsIdArr.push(poll.Id);
+			});
+			eventsArr.map((event: any) => {
+				eventsIdArr.push(event.Id);
+			});
+			const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+			const { data } = await client.query({
+				query: POLLS_EVENTS_DETAILS,
+				variables: {
+					Id: props.session.payload.sub,
+					_in: pollsIdArr,
+					eventId: eventsIdArr,
+					offset: pageSize * page,
+					_gt: getDateFormat()
+				},
+			});
+			if (data.Poll && data.Poll.length == 0) { setNoPollsToFetch(true); }
+			if (data.Poll) {
+
+				if (data.Poll.length > 0) {
+
+					let pollDataArr: any[] = fetchMore ? pollsArr.slice() : [];
+					data.Poll.map((poll: any) => {
+						let pollVotesArr = data.PollVote.filter((x: any) => (x.pollId.toString() == poll.Id.toString()));
+
+
+						let obj: any = {
+							Id: poll.Id,
+							Option1: poll.Option1,
+							Option2: poll.Option2,
+							Option3: poll.Option3,
+							Option4: poll.Option4,
+							Option5: poll.Option5,
+							Question: poll.Question,
+							Reactions: poll.Reactions,
+							warnings: poll.warnings,
+							isDeleted: !poll.isDeleted ? false : poll.isDeleted,
+							Reactions_aggregate: poll.Reactions_aggregate,
+							Comments: poll.Comments,
+							UserProfile: poll.UserProfile,
+							createdAt: poll.createdAt,
+							createdBy: poll.createdBy,
+							pollDurationSlot: poll.pollDurationSlot,
+							updatedAt: poll.updatedAt,
+							__typename: poll.__typename,
+							votes: pollVotesArr
+						}
+						pollDataArr.push(obj);
+					});
+
+					setPollsArr(pollDataArr);
+				} else {
+					setNoMoreDataToFetch(true)
+				}
+				if (data.Event.length > 0 || onlineEventsArr.length > 0) {
+					const filteredEventArr = filterAndSortEvents(data.Event, onlineEventsArr);
+					const upcomingEvent = CreateUpcomingEventArr(filteredEventArr);
+					props.setUpcomingEvents(upcomingEvent);
+					props.setLoadUpcomingEvents(false);
+				}
+				if (fetchMore) {
+					setIsLazyLoading(false);
+					setIsLazyLoadingMsg('');
+				}
+			}
+			setLoadingPolls(false);
+		} catch (error: any) {
+			if (fetchMore) {
+				setIsLazyLoading(false);
+				setIsLazyLoadingMsg('');
+			}
+			setLoadingPolls(false);
+			const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+			const { data } = await client.mutate({
+				mutation: ERROR_LOGS,
+				variables: {
+					errorMessage: error.message,
+					errorScreen: "Poll Component -  fetch Polls event details",
+					userId: props.session.payload.sub,
+					createdTime: currentDate,
+				},
+			});
+		}
+	}
+
+	useEffect(() => {
+
+		if (
+			props.encodedToken &&
+			props.latitude &&
+			props.longitude &&
+			pollsArr.length === 0 &&
+			!props.getLocationStatus &&
+			!noPollsToFetch
+		) {
+			fetchPolls();
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [pollsArr, props.session, currentAddress, props.latitude, props.longitude, props.getLocationStatus, isLazyLoading]);
+
+	useEffect(() => {
+		if (props.refreshFeedName === 'Poll') {
+			fetchPolls();
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [props.refreshFeedName]);
+
+	const getPollById = async (Id: any, type: string) => {
+		try {
+			const client = createApolloClient(await verifySessionExpiry(props.session, props.encodedToken));
+			const { data } = await client.query({
+				query: POLL_BY_ID,
+				variables: { Id: parseInt(Id), userId: props.session.payload.sub },
+			});
+			if (data.Poll?.length > 0) {
+				let prevArr = pollsArr.slice();
+				const index = prevArr.findIndex(
+					(x) => x.Id == Id && x.__typename == type
+				);
+				if (index > -1) {
+					let object = {
+						Id: data.Poll[0].Id,
+						Option1: data.Poll[0].Option1,
+						Option2: data.Poll[0].Option2,
+						Option3: data.Poll[0].Option3,
+						Option4: data.Poll[0].Option4,
+						Option5: data.Poll[0].Option5,
+						Question: data.Poll[0].Question,
+						Reactions: data.Poll[0].Reactions,
+						warnings: data.Poll[0].warnings,
+						isDeleted: !data.Poll[0].isDeleted ? false : data.Poll[0].isDeleted,
+						Reactions_aggregate: data.Poll[0].Reactions_aggregate,
+						PollVote_aggregate: data.PollVote_aggregate,
+						Comments: data.Poll[0].Comments,
+						UserProfile: data.Poll[0].UserProfile,
+						createdAt: data.Poll[0].createdAt,
+						createdBy: data.Poll[0].createdBy,
+						pollDurationSlot: data.Poll[0].pollDurationSlot,
+						updatedAt: data.Poll[0].updatedAt,
+						__typename: data.Poll[0].__typename,
+						votes: data.PollVote
+					}
+					if (post && post?.Id === data.Poll[0].Id) {
+						setPost(object);
+					}
+					prevArr[index] = object;
+					setPollsArr(prevArr);
+				}
+			}
+		} catch (err) { }
+	};
+
+	// const handleScroll = () => {
+	// 	if (pollsArr.length > 0 && !noMoreDataToFetch && !blockDebounceAccess) {
+	// 		const scrollPosition =
+	// 			document.body.clientHeight - 5000 <
+	// 				Math.ceil(window.innerHeight + document.documentElement.scrollTop)
+	// 				? true
+	// 				: false;
+
+	// 		if (scrollPosition == false || blockDebounceAccess) return;
+
+	// 		if (!debounceStatus) {
+	// 			blockDebounceAccess = true;
+	// 			setDebounceStatus(true);
+	// 			const debounceInterval = setTimeout(() => {
+	// 				clearTimeout(debounceInterval);
+	// 				const num = page + 1;
+	// 				setPage(num);
+	// 				blockDebounceAccess = false;
+	// 				setDebounceStatus(false);
+	// 			}, 3000);
+	// 		}
+	// 	}
+	// };
+  const handleScroll = () => {
+    if (eventsArr.length > 0 && !noMoreDataToFetch && !blockDebounceAccess) {
+      const scrollPosition =
+        document.body.clientHeight - 5000 <
+          Math.ceil(window.innerHeight + document.documentElement.scrollTop)
+          ? true
+          : false;
+
+      if (scrollPosition == false || blockDebounceAccess) return;
+
+      if (!debounceStatus) {
+        blockDebounceAccess = true;
+        setDebounceStatus(true);
+        const debounceInterval = setTimeout(() => {
+          clearTimeout(debounceInterval);
+          const num = page + 1;
+          setPage(num);
+          blockDebounceAccess = false;
+          setDebounceStatus(false);
+        }, 3000);
+      }
+    }
+  };
+
+	useEffect(() => {
+		window.addEventListener("scroll", handleScroll);
+		return () => window.removeEventListener("scroll", handleScroll);
+	});
+
+	useEffect(() => {
+		if (!blockDebounceAccess && pollsArr.length == 0) return;
+		fetchMoreListItems();
+	}, [blockDebounceAccess, page]);
+
+
+
+  return (
+    // <>
+    //   <div className="position-relative">
+
+    //     {eventsArr &&
+    //       eventsArr.map((issueEvent: any, index: number) => {
+    //         if (issueEvent.__typename === "Event") {
+    //           return (
+    //             <EventsPost
+    //               key={index}
+    //               topMargin={props.isDesktop ? "mt-3" : "" || props.isMobile ? (index === 0 ? "card-top-neg-margin card-border-top-round position-relative" : `mt-3`) : ""}
+    //               topBorder={props.isMobile ? (index === 0 ? "card-border-top-round" : ``) : ""}
+    //               event={issueEvent}
+    //               setPostDetailsAndDisplay={setPostDetailsAndDisplay}
+    //               showReportingOptions={showReportingOptions}
+    //               userId={props.session ? props.session.payload.sub : ""}
+    //               refreshList={fetchEvents}
+    //               profileData={profileDetails}
+    //               fetchIndividual={getEventById}
+    //               deleteItem={deleteItem}
+
+    //             ></EventsPost>
+    //           );
+    //         }
+    //       })}
+    //     {eventsArr && eventsArr.length === 0 && (
+    //       <div className="row">
+    //         <div className="w-100 p-0">
+    //           <EmptyEvents
+    //             setActionTypeAndDisplay={props.setActionTypeAndDisplay}
+    //             loadingEvents={loadingEvents}
+    //             message={message}
+    //             mobile={props.isMobile}
+    //           />
+    //         </div>
+    //       </div>
+    //     )}
+    //   </div>
+    //   {isLazyLoading && <FeedLoader message={isLazyLoadingMsg} />}
+    //   <ShowDetailsMobile
+    //     status={showDetailsMobile}
+    //     hidePostDetails={hidePostDetails}
+    //   >
+    //     {eventDetailsStatus && (
+    //       <EventPostDetails
+    //         post={post}
+    //         userId={props.session.payload.sub}
+    //         refreshList={fetchEvents}
+    //         hidePostDetails={hidePostDetails}
+    //         profileData={profileDetails}
+    //         showReportingOptions={showReportingOptions}
+    //         fetchIndividual={getEventById}
+    //         encodedToken={props.encodedToken}
+    //         deleteItem={deleteItem}
+    //       ></EventPostDetails>
+    //     )}
+    //     {displayComments && (
+    //       <CommentsMobile
+    //         post={post}
+    //         hidePostDetails={hidePostDetails}
+    //         hideCommentsOpenPost={hideCommentsOpenPost}
+    //         encodedToken={props.encodedToken}
+    //         session={props.session}
+    //         userId={props.session.payload.sub}
+    //         refreshList={fetchEvents}
+    //         fetchIndividual={getEventById}
+    //       />
+    //     )}
+    //     {reportOptionsStatus && (
+    //       <ReportingOptions
+    //         post={post}
+    //         setShow={setShowDetailsWeb}
+    //         userId={props.session.payload.sub}
+    //         refreshList={fetchEvents}
+    //         hidePostDetails={hidePostDetails}
+    //         fetchIndividual={getEventById}
+    //         profileData={profileDetails}
+    //         encodedToken={props.encodedToken}
+    //         session={props.session}
+    //         title={"Event"}
+    //       ></ReportingOptions>
+    //     )}
+    //   </ShowDetailsMobile>
+    //   <ShowDetailsWeb
+    //     status={showDetailsWeb}
+    //     setShow={hidePostDetails}
+    //     widthClass={"component-width-normal"}
+    //     overlayClass={"slider-overlay-bg-light"}
+    //   >
+    //     {eventDetailsStatus && (
+    //       <EventPostDetails
+    //         post={post}
+    //         setShow={setShowDetailsWeb}
+    //         userId={props.session.payload.sub}
+    //         refreshList={fetchEvents}
+    //         showReportingOptions={showReportingOptions}
+    //         hidePostDetails={hidePostDetails}
+    //         profileData={profileDetails}
+    //         fetchIndividual={getEventById}
+    //         encodedToken={props.encodedToken}
+    //         deleteItem={deleteItem}
+    //       ></EventPostDetails>
+    //     )}
+    //     {reportOptionsStatus && (
+
+    //       <ReportingOptions
+    //         post={post}
+    //         setShow={setShowDetailsWeb}
+    //         userId={props.session.payload.sub}
+    //         refreshList={getEventById}
+    //         hidePostDetails={hidePostDetails}
+    //         fetchIndividual={getEventById}
+    //         profileData={profileDetails}
+    //         title={"Event"}
+    //       ></ReportingOptions>
+    //     )}
+    //   </ShowDetailsWeb>
+    // </>
+    <>
+			<div className="position-relative">
+
+				{pollsArr && pollsArr?.map((poll: any, index: number) => {
+					return (
+						<PollsPost
+							key={`${poll.Id}${poll.createdBy}`}
+							topMargin={props.isDesktop ? "mt-3" : "" || props.isMobile ? (index === 0 ? "card-top-neg-margin card-border-top-round position-relative" : `mt-3`) : ""}
+							topBorder={props.isMobile ? (index === 0 ? "card-border-top-round" : ``) : ""}
+							poll={poll}
+							setPostDetailsAndDisplay={setPostDetailsAndDisplay}
+							showReportingOptions={showReportingOptions}
+							userId={props.session ? props.session.payload.sub : ""}
+							refreshList={fetchPolls}
+							fetchIndividual={getPollById}
+							profileData={profileData}
+							deleteItem={deleteItem}
+						></PollsPost>
+					);
+				})}
+				{pollsArr && pollsArr.length === 0 && (
+					<div className="row">
+						<div className="w-100 p-0">
+							<EmptyCommon
+								mobile={props.isMobile}
+								setActionTypeAndDisplay={props.setActionTypeAndDisplay}
+								loading={loadingPolls}
+								message={message}
+								messageForEmpty={'No polls were found'}
+								mobileLink={'/polls/addPoll'}
+								buttonText={'Create A Poll'}
+								type={'poll'}
+							/>
+						</div>
+					</div>
+				)}
+			</div>
+			{isLazyLoading && <FeedLoader message={isLazyLoadingMsg} />}
+			<ShowDetailsMobile
+				status={showDetailsMobile}
+				hidePostDetails={hidePostDetails}
+			>
+				{issueDetailsStatus && (
+					<PollPostDetails
+						post={post}
+						userId={props.session.payload.sub}
+						refreshList={fetchPolls}
+						hidePostDetails={hidePostDetails}
+						fetchIndividual={getPollById}
+						showReportingOptions={showReportingOptions}
+						profileData={profileData}
+						deleteItem={deleteItem}
+					></PollPostDetails>
+				)}
+				{displayComments && (
+					<CommentsMobile
+						post={post}
+						hidePostDetails={hidePostDetails}
+						hideCommentsOpenPost={hideCommentsOpenPost}
+						encodedToken={props.encodedToken}
+						session={props.session}
+						userId={props.session.payload.sub}
+						refreshList={fetchPolls}
+						fetchIndividual={getPollById}
+					/>
+				)}
+				{reportOptionsStatus && (
+					<ReportingOptions
+						post={post}
+						setShow={setShowDetailsWeb}
+						userId={props.session.payload.sub}
+						refreshList={fetchPolls}
+						hidePostDetails={hidePostDetails}
+						fetchIndividual={getPollById}
+						profileData={profileData}
+						encodedToken={props.encodedToken}
+						session={props.session}
+						title={"Poll"}
+					></ReportingOptions>
+				)}
+			</ShowDetailsMobile>
+			<ShowDetailsWeb
+				status={showDetailsWeb}
+				setShow={hidePostDetails}
+				widthClass={"component-width-normal"}
+				overlayClass={"slider-overlay-bg-light"}
+			>
+				{issueDetailsStatus && (
+					<PollPostDetails
+						post={post}
+						setShow={setShowDetailsWeb}
+						userId={props.session.payload.sub}
+						refreshList={fetchPolls}
+						hidePostDetails={hidePostDetails}
+						fetchIndividual={getPollById}
+						showReportingOptions={showReportingOptions}
+						profileData={profileData}
+						deleteItem={deleteItem}
+					></PollPostDetails>
+				)}
+				{reportOptionsStatus && (
+
+					<ReportingOptions
+						post={post}
+						setShow={setShowDetailsWeb}
+						userId={props.session.payload.sub}
+						refreshList={getPollById}
+						hidePostDetails={hidePostDetails}
+						fetchIndividual={getPollById}
+						profileData={profileData}
+						title={"Poll"}
+					></ReportingOptions>
+				)}
+			</ShowDetailsWeb>
+		</>
+  )
+}
+
+export default EventsComponent

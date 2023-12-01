@@ -1,0 +1,51 @@
+version: 0.2
+
+phases:
+  install: # Install AWS cli, kubectl and Helm3
+    commands:
+       - apt-get update
+       - apt-get install -y git python3 python3-pip
+       - pip install awscli
+       - curl -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.12.10/2019-08-14/bin/linux/amd64/aws-iam-authenticator
+       - chmod +x ./aws-iam-authenticator
+       - mkdir -p ~/bin && cp ./aws-iam-authenticator ~/bin/aws-iam-authenticator && export PATH=~/bin:$PATH
+      #  - curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+      #  - chmod +x kubectl
+      #  - mv ./kubectl /usr/local/bin/kubectl
+      #  - curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      #  - helm repo add stable https://charts.helm.sh/stable && helm repo update
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      # - echo Logging in to Amazon EKS...
+      # - "helm version"
+      # - "mkdir ~/.kube/"
+      # - "aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name $EKS_CLUSTER_NAME --role-arn $EKS_CODEBUILD_ROLE_ARN"
+      # - "chmod 0600 ~/.kube/config"
+      # - cat  ~/.kube/config
+      # #- "kubectl get nodes"
+      # - "aws sts get-caller-identity"
+      # - "kubectl get all"
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - IMAGE_TAG=$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - docker build -t frontend:$IMAGE_TAG .
+      - docker tag frontend:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/frontend:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image....
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/frontend:$IMAGE_TAG
+      - "cd ~/"
+      - git clone https://mohit-m-jws:$GIT_TOKEN@bitbucket.org/amit-jws/we-comm-aws-infra.git
+      - cd we-comm-aws-infra/
+      - old_image_tag=`cat app-deployments/we-comm-frontend/frontend.yaml | grep "image:" | cut -f 3 -d ":"`
+      - sed -i "s/$old_image_tag/$IMAGE_TAG/" app-deployments/we-comm-frontend/frontend.yaml
+      - git add .
+      - git config --global user.email "mohit.m@jointworksolutions.com"
+      - git config --global user.name "mohit-m-jws"
+      - git commit -m "Image Tags updated"
+      - git push origin master
